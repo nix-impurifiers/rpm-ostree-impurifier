@@ -3,8 +3,18 @@
   pkgs,
   impurifier,
   coreSrc,
+  bundled ? false,
 }:
 let
+  staticNix = import (coreSrc + "/tests/static-nix.nix") { inherit pkgs; };
+  bundleArgs = pkgs.lib.optionalAttrs bundled {
+    bundledNixStore = "${staticNix}/bin/nix-store";
+    bundledNixNotices = [ "${pkgs.nix.src}/COPYING" ];
+  };
+  builder = impurifier // {
+    makeNetRpm = args: impurifier.makeNetRpm (args // bundleArgs);
+    makeOfflineRpm = args: impurifier.makeOfflineRpm (args // bundleArgs);
+  };
   native = impurifier.native;
   app = pkgs.writeShellScriptBin "ostree-app" "echo ostree-one" // {
     pname = "ostree-app";
@@ -14,15 +24,15 @@ let
     pname = "ostree-app";
     version = "2";
   };
-  net = impurifier.makeNetRpm { pkg = app; };
-  offline = impurifier.makeOfflineRpm { pkg = app; };
-  upgrade = impurifier.makeOfflineRpm { pkg = app2; };
-  needsProvider = impurifier.makeOfflineRpm {
+  net = builder.makeNetRpm { pkg = app; };
+  offline = builder.makeOfflineRpm { pkg = app; };
+  upgrade = builder.makeOfflineRpm { pkg = app2; };
+  needsProvider = builder.makeOfflineRpm {
     pkg = app;
     hostDependencies = [ "nix-impurifier-provider >= 999" ];
   };
   fixture = import (coreSrc + "/tests/hardware-fixture.nix") { inherit pkgs; };
-  hardware = impurifier.makeOfflineRpm {
+  hardware = builder.makeOfflineRpm {
     pkg = fixture.tool;
     hardware = fixture.hardware;
   };
@@ -65,12 +75,17 @@ let
       '';
   testRpm = impurifier.buildRpm {
     name = "ostree-proof";
+    architecture = "x86_64";
     version = "1";
-    payload = pkgs.runCommand "ostree-proof-payload" { } ''
-      mkdir -p $out/usr/bin
-      printf '#!${pkgs.runtimeShell}\necho native-layered\n' > $out/usr/bin/ostree-proof
-      chmod 755 $out/usr/bin/ostree-proof
-    '';
+    payload =
+      pkgs.runCommand "ostree-proof-payload" { nativeBuildInputs = [ pkgs.pkgsStatic.stdenv.cc ]; }
+        ''
+          mkdir -p $out/usr/bin
+          echo '#include <stdio.h>' > proof.c
+          echo 'int main(void) { puts("native-layered"); return 0; }' >> proof.c
+          $CC -static proof.c -o $out/usr/bin/ostree-proof
+          chmod 755 $out/usr/bin/ostree-proof
+        '';
   };
   disk = pkgs.runCommand "tukit-empty-btrfs.raw" { nativeBuildInputs = [ pkgs.btrfs-progs ]; } ''
     truncate -s 4096M $out
@@ -79,7 +94,7 @@ let
 in
 {
   native-vm = pkgs.testers.runNixOSTest {
-    name = "rpm-ostree-native-contract";
+    name = "rpm-ostree-native-contract${pkgs.lib.optionalString bundled "-bundled"}";
     globalTimeout = 900;
     requiredFeatures = {
       kvm = false;
@@ -320,9 +335,17 @@ in
       machine.start()
       machine.wait_for_unit("multi-user.target", timeout=60)
       assert machine.succeed("/usr/bin/ostree-proof").strip() == "native-layered"
+      machine.succeed("mkdir -p /var/lib/native-proof/usr/bin; cp /usr/bin/ostree-proof /var/lib/native-proof/usr/bin/ostree-proof")
+      assert machine.succeed("chroot /var/lib/native-proof /usr/bin/ostree-proof").strip() == "native-layered"
+      machine.succeed("test ! -e /var/lib/native-proof/nix")
       machine.succeed("rpm-ostree status --json")
+      ${pkgs.lib.optionalString bundled ''
+        machine.succeed("mkdir -p /home/consumer/no-nix; printf '#!${pkgs.runtimeShell}\\necho incompatible-client\\n' > /home/consumer/no-nix/nix-store; chmod 755 /home/consumer/no-nix/nix-store")
+      ''}
       def user(command):
-          return "su - consumer -c " + shlex.quote(command)
+          return "su - consumer -c " + shlex.quote(("PATH=/home/consumer/no-nix:$PATH " if ${
+            if bundled then "True" else "False"
+          } else "") + command)
       def boot_pending():
           machine.succeed("PATH=/usr/bin:/usr/sbin:$PATH ostree admin finalize-staged")
           selected = machine.succeed("entry=$(grep -H '^version ' /boot/loader/entries/*.conf | sort -k2,2nr | head -n1 | cut -d: -f1); grep '^options ' \"$entry\"").strip().split('ostree=')[1].split()[0]

@@ -84,3 +84,23 @@ This project currently targets x86_64 Linux application commands. Services,
 accounts, arbitrary filesystem payloads, automatic Nix provisioning, concurrent
 administration, other architectures and full Fedora/RHEL boot coverage remain
 separate work. Run `nix flake check -L` for native VM checks.
+
+## Native payloads and bundled clients
+
+`buildRpm { name; version; architecture; payload; license; }` already supports
+prepared native filesystem payloads without Nix activation or runtime hooks.
+Layer those RPMs with `rpm-ostree install`; they use the native deployment and
+rollback policy. The producer supplies binaries for the base ABI and correct
+RPM dependencies. The VM's native layered proof is a compiled static binary,
+also executed in an isolated root without `/nix`. The full manager fixture
+retains its documented NixOS host tools and store.
+
+Nix-backed application constructors also accept `bundledNixStore` (a supplied
+static ELF executable) and `bundledNixNotices` (upstream notice files). The
+application carries the client privately and uses a Python-only SDK. Launch
+prefers a compatible external client, then the bundle, before registering roots
+or capturing hardware. Explicit `IMPURIFIER_NIX_STORE` disables fallback.
+Trusted preparation still uses host tools and never executes the image-owned
+client as root. An existing store, daemon and initial SDK preparation remain
+required. The separate bundled VM repeats the native lifecycle with an
+incompatible external candidate; this is not a Nix installer.
